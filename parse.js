@@ -343,6 +343,7 @@ function incorporateLine(line, li, lines, stack, refs) {
           pos = 0; col = col + want;
           n = text.length;
         } else { pos = r[0]; col = r[1]; }
+        b.lastIndent4 = indentCols(text, pos, n, col)[1] >= 4;
         container = b; matchedDepth = d; continue;
       }
       // a table inside the item marked re-lexes takes this line as a row even
@@ -365,6 +366,20 @@ function incorporateLine(line, li, lines, stack, refs) {
 
   { const t = expandLeadTabs(text, pos, col, n); text = t[0]; pos = t[1]; col = t[2]; n = text.length; }
   let tip0 = stack[stack.length - 1];
+  // marked's list loop ends the item on a line that is not indented into it when
+  // the line the item took last sat four or more columns in: the item's re-lexed
+  // text would open an indented code block there, which no line continues
+  if (!allMatched) {
+    const it = lastItem(stack);
+    if (it && it.open && it.lastIndent4) {
+      it.open = false;
+      closeUnmatched(stack, it.parent || stack[0]);
+      tip0 = stack[stack.length - 1];
+      container = tip0.type === 'list' ? (tip0.parent || stack[0]) : tip0;
+      matchedDepth = stack.length - 1;
+      allMatched = true;
+    }
+  }
   const rawWsOnly = isBlankAt(line.t, 0, line.t.length);
   const isLastLine = li === lines.length - 1;
   const paraOwnMatched = tip0.type === 'para' && container === stack[stack.length - 2];
