@@ -68,13 +68,20 @@ function newBlock(type, parent) {
 
 function addChild(parent, b) {
   if (parent.type === 'item') {
-    if (parent.blankSeen) parent.innerBlank = true;
-    if (b.type === 'item' && parent.blankSeen) parent.innerBlank = true;
+    if (b.type !== 'item' && (parent.blankSeen || parent.blankAbove)) parent.innerBlank = true;
+    if (b.type !== 'item') parent.blankSeen = false;
   }
   if (parent.type === 'list' && b.type === 'item') {
     const ch = parent.children || [];
     const prev = ch[ch.length - 1];
-    if (prev && prev.blankSeen) parent.looseBySeparation = true;
+    if (prev) {
+      const deep = deepestItem(prev);
+      if (prev.blankSeen || (deep && deep.blankSeen)) {
+        parent.looseBySeparation = true;
+        prev.blankSeen = false;
+        if (deep) deep.blankSeen = false;
+      }
+    }
   }
   if (!parent.children) parent.children = [];
   parent.children.push(b);
@@ -125,8 +132,11 @@ function skipSpace(t, pos, end, col, n) {
   while (pos < end && n > 0) {
     const c = t.charCodeAt(pos);
     if (c === 32) { pos++; col++; n--; }
-    else if (c === 9) { pos++; col = (col & ~3) + 4; n--; }
-    else break;
+    else if (c === 9) {
+      const w = 4 - (col & 3);
+      if (w > n) break;
+      pos++; col += w; n -= w;
+    } else break;
   }
   return [pos, col];
 }
@@ -171,6 +181,12 @@ function applyOne(text, pos, col, n) {
   return [text, pos, col, n];
 }
 
+function expandTabAt(text, pos, col, n) {
+  if (pos >= n || text.charCodeAt(pos) !== 9) return [text, pos, col, n];
+  const w = 4 - (col & 3);
+  return [text.slice(0, pos) + ' '.repeat(w) + text.slice(pos + 1), pos + w, col + w, n + w - 1];
+}
+
 function incorporateLine(line, li, lines, stack, refs) {
   let text = line.t;
   let pos = 0;
@@ -192,6 +208,8 @@ function incorporateLine(line, li, lines, stack, refs) {
         p = r[0] + 1; c = r[1] + 1;
         const q = applyOne(text, p, c, n);
         text = q[0]; pos = q[1]; col = q[2]; n = q[3];
+        const q2 = expandTabAt(text, pos, col, n);
+        text = q2[0]; pos = q2[1]; col = q2[2]; n = q2[3];
         container = b; matchedDepth = d; continue;
       }
       allMatched = false; failedQuoteDepth = d; break;
@@ -279,6 +297,7 @@ function incorporateLine(line, li, lines, stack, refs) {
       const it = lastItem(stack);
       if (it && (!it.children || it.children.length === 0)) {
         // an item that never got content cannot continue past a blank line
+        it.blankSeen = true;
         closeUnmatched(stack, it.parent || stack[0]);
         flagBlank(stack);
         return li + 1;
@@ -293,7 +312,7 @@ function incorporateLine(line, li, lines, stack, refs) {
   if (!allMatched && tip0.type !== 'para') {
     closeUnmatched(stack, stack[matchedDepth] || stack[0]);
     tip0 = stack[stack.length - 1];
-    container = tip0;
+    container = tip0.type === 'list' ? (tip0.parent || stack[0]) : tip0;
     matchedDepth = stack.length - 1;
     allMatched = true;
   }
@@ -366,7 +385,17 @@ function incorporateLine(line, li, lines, stack, refs) {
           return li + 1;
         }
       }
-      // d) strip-run or verbatim lazy
+      // d) block starts that interrupt a paragraph
+      if (tryHtmlStart(text, p, n, true) || tryFence(text, p, n) || tryAtx(text, p, n) ||
+          (!interruptQuote(text, p, n))) {
+        closeUnmatched(stack, stack[matchedDepth] || stack[0]);
+        container = stack[stack.length - 1];
+        if (container.type === 'list') container = container.parent || stack[0];
+        matchedDepth = stack.length - 1;
+        allMatched = true;
+        continue;
+      }
+      // e) strip-run or verbatim lazy
       pushLazyLine(tip0, text.slice(p), isLastLine);
       return li + 1;
     }
@@ -398,6 +427,8 @@ function incorporateLine(line, li, lines, stack, refs) {
         pos = r[0] + 1; col = r[1] + 1;
         const q3 = applyOne(text, pos, col, n);
         text = q3[0]; pos = q3[1]; col = q3[2]; n = q3[3];
+        const q4 = expandTabAt(text, pos, col, n);
+        text = q4[0]; pos = q4[1]; col = q4[2]; n = q4[3];
         container = q2;
         continue;
       }
@@ -512,11 +543,14 @@ function incorporateLine(line, li, lines, stack, refs) {
     return li + 1;
   }
   if (tipNow.type === 'fence') {
-    const r = takeIndent(text, pos, n, col, tipNow.fenceIndent);
-    let s;
-    if (r[2] > 0) s = ' '.repeat(r[2]) + text.slice(r[0]);
-    else s = text.slice(r[0]);
-    tipNow.lines.push(s);
+    // marked strips the fence's own indent from backtick fences only
+    if (tipNow.fenceChar === 96) {
+      const r = takeIndent(text, pos, n, col, tipNow.fenceIndent);
+      if (r[2] > 0) tipNow.lines.push(' '.repeat(r[2]) + text.slice(r[0]));
+      else tipNow.lines.push(text.slice(r[0]));
+    } else {
+      tipNow.lines.push(text.slice(pos));
+    }
     return li + 1;
   }
   if (tipNow.type === 'html') {
@@ -554,6 +588,11 @@ function incorporateLine(line, li, lines, stack, refs) {
     return li + 1;
   }
   return li + 1;
+}
+
+function interruptQuote(t, pos, end) {
+  const r = skipSpace(t, pos, end, 0, 3);
+  return t.charCodeAt(r[0]) !== 62;
 }
 
 function peekListMarker(t, pos, end) {
@@ -640,12 +679,36 @@ function lastItem(stack) {
 }
 
 function markBlank(stack) {
+  let first = true;
   let any = null;
   for (let k = stack.length - 1; k >= 0; k--) {
     const b = stack[k];
-    if (b.type === 'item') { b.blankSeen = true; if (!any) any = b; }
+    if (b.type === 'blockquote') break; // a blank inside a quote is not the list's
+    if (b.type === 'item') {
+      if (first) { b.blankSeen = true; any = b; first = false; }
+      else b.blankAbove = true;
+    }
   }
   return any;
+}
+
+// deepest item reachable through trailing lists of an item's children
+function deepestItem(item) {
+  let ch = item.children;
+  while (ch && ch.length) {
+    const last = ch[ch.length - 1];
+    if (last.type === 'item') return last;
+    if (last.type === 'list') {
+      const items = last.children;
+      if (!items || !items.length) return null;
+      const li = items[items.length - 1];
+      if (li.type !== 'item') return null;
+      const deeper = deepestItem(li);
+      return deeper || li;
+    }
+    return null;
+  }
+  return null;
 }
 
 function closeUnmatched(stack, container) {
@@ -793,9 +856,11 @@ function renderBlocks(blocks, refs, loose, tight) {
 
 function renderBlock(b, refs, loose, tight) {
   switch (b.type) {
-    case 'para':
-      if (tight) return renderInline(b.lines.join('\n'), refs, false);
-      return '<p>' + renderInline(b.lines.join('\n'), refs, false) + '</p>\n';
+    case 'para': {
+      const src = b.lines.join('\n');
+      if (tight) return renderInline(src.replace(/[ \t]+$/, ''), refs, false);
+      return '<p>' + renderInline(src, refs, false) + '</p>\n';
+    }
     case 'heading':
       return '<h' + b.level + '>' + renderInline(b.content, refs, false) + '</h' + b.level + '>\n';
     case 'setext':
@@ -813,6 +878,7 @@ function renderBlock(b, refs, loose, tight) {
       const info = b.info || '';
       const lang = unescapeString(info.trim().split(/\s+/)[0] || '');
       const cls = lang ? ' class="language-' + lang + '"' : '';
+      if (b.lines.length && b.lines[b.lines.length - 1] === '') b.lines.pop();
       const body = b.lines.length ? b.lines.join('\n') + '\n' : '';
       return '<pre><code' + cls + '>' + escapeCode(body) + '</code></pre>\n';
     }
@@ -992,8 +1058,21 @@ function splitRowAny(line) {
     if (c === 96) {
       let j = i;
       while (j < n && line.charCodeAt(j) === 96) j++;
-      ticks = j - i;
-      inCode = true;
+      const len0 = j - i;
+      // only a code span whose closing run exists keeps pipes inside
+      let k = j, found = -1;
+      while (k < n && line.charCodeAt(k) !== 124) {
+        if (line.charCodeAt(k) === 96) {
+          let m = k;
+          while (m < n && line.charCodeAt(m) === 96) m++;
+          if (m - k === len0) { found = k; break; }
+          k = m;
+        } else k++;
+      }
+      if (found >= 0) {
+        ticks = len0;
+        inCode = true;
+      }
       cur += line.slice(i, j);
       i = j;
       continue;
@@ -1012,8 +1091,10 @@ function cleanCell(s) {
 
 function splitRow(line, cols) {
   let cells = splitRowAny(line);
-  // drop leading empty when line starts with |
-  if (line.length > 0 && line.charCodeAt(0) === 124) cells.shift();
+  // drop leading empty when the row starts with an optional indent then a pipe
+  let q = 0;
+  while (q < line.length && line.charCodeAt(q) === 32) q++;
+  if (line.length > 0 && line.charCodeAt(q) === 124) cells.shift();
   // drop trailing empty when line ends with |
   if (cells.length > 0 && line.length > 0 && line.charCodeAt(line.length - 1) === 124) cells.pop();
   cells = cells.map(cleanCell);
@@ -1070,7 +1151,7 @@ function isTableRow(t, pos, end, lines, li) {
   if (c === 60) {
     if (tryHtmlStart(t, p, end, false)) return false;
   }
-  if (c === 45 || c === 43 || c === 42) return false; // list bullets
+  if ((c === 45 || c === 43 || c === 42) && (p + 1 >= end || t.charCodeAt(p + 1) === 32 || t.charCodeAt(p + 1) === 9)) return false;
   if (c >= 48 && c <= 57) {
     let j = p, digits = 0;
     while (j < end && t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57) { j++; digits++; }
@@ -1121,7 +1202,11 @@ function tryListItem(text, p, n, c, stack, container, interrupt, refs, lines, li
       j++;
     }
     if (blankItem) return null;
-    if (ordered && start !== 1) return null;
+    if (ordered && start !== 1) {
+      let inList = false;
+      for (const b of stack) if (b.type === 'item') { inList = true; break; }
+      if (!inList) return null;
+    }
   }
 
   // find home list (sibling) or home container (new list)
@@ -1130,12 +1215,12 @@ function tryListItem(text, p, n, c, stack, container, interrupt, refs, lines, li
   let homeList = null;
   while (b) {
     if (b.type === 'item') {
-      if (b.contentIndent > itemStartCol || b.depth > matchedDepth) { b = b.parent; continue; }
+      if (b.contentIndentAbs > itemStartCol || b.depth > matchedDepth) { b = b.parent; continue; }
       home = b; // marker within item content: nested list
       break;
     }
     if (b.type === 'list') {
-      if (listMatches(b, ordered, marker) && (b.indent || 0) <= itemStartCol && b.depth <= matchedDepth) { homeList = b; home = b; break; }
+      if (listMatches(b, ordered, marker) && b.depth <= matchedDepth) { homeList = b; home = b; break; }
       b = b.parent;
       continue;
     }
@@ -1192,7 +1277,8 @@ function tryListItem(text, p, n, c, stack, container, interrupt, refs, lines, li
   }
 
   const item = addChild(list, newBlock('item', list));
-  item.contentIndent = contentIndent;
+  item.contentIndent = contentIndent - c;
+  item.contentIndentAbs = contentIndent;
   stack.push(item);
 
   if (j >= n) return [j, col2, false, null, n];
@@ -1574,11 +1660,6 @@ function tokenizeInline(src, refs, toks, delims, brackets) {
         }
         const tag = scanTag(src, i, n);
         if (tag) {
-          if (isDisallowedTag(tag[0])) {
-            toks.push({ k: 't', s: '&' });
-            i = i + 1;
-            continue;
-          }
           toks.push({ k: 'html', s: src.slice(i, tag[1]) });
           i = tag[1];
           continue;
@@ -1698,7 +1779,7 @@ function tokenizeInline(src, refs, toks, delims, brackets) {
             if (bufEnd <= bufStart) { bufStart = -1; bufEnd = -1; }
             flush();
           } else flush();
-          toks.push({ k: 'link', href: 'mailto:' + em[0], title: null, text: em[0], auto: true });
+          toks.push({ k: 'link', href: 'mailto:' + em[0], title: null, text: em[0], auto: true, ext: true });
           i = em[1];
           continue;
         }
@@ -1713,15 +1794,15 @@ function tokenizeInline(src, refs, toks, delims, brackets) {
           const em1 = tryExtEmailAt(src, i, bufStart);
           if (em1) {
             flush();
-            toks.push({ k: 'link', href: 'mailto:' + em1[0], title: null, text: em1[0], auto: true });
+            toks.push({ k: 'link', href: 'mailto:' + em1[0], title: null, text: em1[0], auto: true, ext: true });
             i = em1[1];
             continue;
           }
         }
-        const ext = tryExtUrl(src, i, bufStart);
+        const ext = tryExtUrl(src, i, bufStart, brackets.length > 0);
         if (ext) {
           flush();
-          toks.push({ k: 'link', href: ext[2], title: null, text: ext[0], auto: true });
+          toks.push({ k: 'link', href: ext[2], title: null, text: ext[0], auto: true, ext: true });
           i = ext[1];
           continue;
         }
@@ -1926,7 +2007,10 @@ function tryExtEmail(src, at, bufStart) {
     if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 95 || c === 46) i++;
     else break;
   }
-  const dom = src.slice(domStart, i);
+  const rawDom = src.slice(domStart, i);
+  const dom = rawDom.replace(/[._-]+$/, '');
+  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
+  if (dom.length < rawDom.length) i = domStart + dom.length;
   if (!validDomain(dom)) return null;
   const email = src.slice(s, i);
   if (i < n && src.charCodeAt(i) === 47) return null; // followed by /
@@ -1958,7 +2042,10 @@ function tryExtEmailAt(src, pos, bufStart) {
     if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 95 || c === 46) i++;
     else break;
   }
-  const dom = src.slice(domStart, i);
+  const rawDom = src.slice(domStart, i);
+  const dom = rawDom.replace(/[._-]+$/, '');
+  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
+  if (dom.length < rawDom.length) i = domStart + dom.length;
   if (!validDomain(dom)) return null;
   if (i < n && src.charCodeAt(i) === 47) return null; // followed by /
   let e2 = i;
@@ -1967,7 +2054,7 @@ function tryExtEmailAt(src, pos, bufStart) {
   return [src.slice(localStart, e2), e2];
 }
 
-function tryExtUrl(src, i, bufStart) {
+function tryExtUrl(src, i, bufStart, inBracket) {
   const n = src.length;
   // trigger check
   if (i > 0) {
@@ -1976,12 +2063,13 @@ function tryExtUrl(src, i, bufStart) {
   }
   let kind = null;
   let j = i;
+  const head = src.slice(i, Math.min(n, i + 8)).toLowerCase();
   if (src.startsWith('www.', i)) { kind = 'www'; j = i + 4; }
-  else if (src.startsWith('http://', i)) { kind = 'http'; j = i + 7; }
-  else if (src.startsWith('https://', i)) { kind = 'https'; j = i + 8; }
-  else if (src.startsWith('ftp://', i)) { kind = 'ftp'; j = i + 6; }
-  else if (src.startsWith('mailto:', i)) { kind = 'mailto'; j = i + 7; }
-  else if (src.startsWith('xmpp:', i)) { kind = 'xmpp'; j = i + 5; }
+  else if (head.startsWith('http://')) { kind = 'http'; j = i + 7; }
+  else if (head.startsWith('https://')) { kind = 'https'; j = i + 8; }
+  else if (head.startsWith('ftp://')) { kind = 'ftp'; j = i + 6; }
+  else if (head.startsWith('mailto:')) { kind = 'mailto'; j = i + 7; }
+  else if (head.startsWith('xmpp:')) { kind = 'xmpp'; j = i + 5; }
   if (!kind) return null;
 
   if (kind === 'mailto' || kind === 'xmpp') {
@@ -2012,12 +2100,15 @@ function tryExtUrl(src, i, bufStart) {
     if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 95 || c === 46) j++;
     else break;
   }
-  const dom = src.slice(domStart, j);
+  const rawDom = src.slice(domStart, j);
+  const dom = rawDom.replace(/[._-]+$/, '');
+  if (dom.length < rawDom.length) j = domStart + dom.length;
   if (!validDomain(dom)) return null;
   // path
   while (j < n) {
     const c = src.charCodeAt(j);
     if (c <= 32 || c === 60) break;
+    if (inBracket && (c === 91 || c === 93)) break;
     j++;
   }
   let end = j;
@@ -2030,16 +2121,19 @@ function tryExtUrl(src, i, bufStart) {
       end = i + text.length;
     }
   }
-  // trim trailing punctuation
-  while (end > domStart && isTrailingPunct(src.charCodeAt(end - 1))) { end--; }
-  // unbalanced parens
-  let parens = 0;
-  for (let k = i; k < end; k++) {
-    const c = src.charCodeAt(k);
-    if (c === 40) parens++;
-    else if (c === 41) parens--;
+  // trim trailing punctuation and unbalanced closing parens until stable
+  for (;;) {
+    const before = end;
+    while (end > domStart && isTrailingPunct(src.charCodeAt(end - 1))) end--;
+    let parens = 0;
+    for (let k = i; k < end; k++) {
+      const c = src.charCodeAt(k);
+      if (c === 40) parens++;
+      else if (c === 41) parens--;
+    }
+    if (parens < 0 && end > domStart && src.charCodeAt(end - 1) === 41) { end--; continue; }
+    if (end === before) break;
   }
-  while (parens < 0 && end > domStart && src.charCodeAt(end - 1) === 41) { end--; parens++; }
   if (end <= i) return null;
   text = src.slice(i, end);
   const href = kind === 'www' ? 'http://' + text : text;
@@ -2047,7 +2141,7 @@ function tryExtUrl(src, i, bufStart) {
 }
 
 function validDomain(dom) {
-  const d = dom.endsWith('.') ? dom.slice(0, -1) : dom;
+  const d = dom.replace(/\.+$/, '');
   if (!d) return false;
   const segs = d.split('.');
   if (segs.length < 2) return false;
@@ -2073,13 +2167,16 @@ function scanEmailAfter(s, pos, n) {
     if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 95 || c === 46) i++;
     else break;
   }
-  const dom = s.slice(domStart, i);
+  const rawDom = s.slice(domStart, i);
+  const dom = rawDom.replace(/[._-]+$/, '');
+  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
+  if (dom.length < rawDom.length) i = domStart + dom.length;
   if (!validDomain(dom)) return null;
   return [s.slice(pos, i), i];
 }
 
 function isTrailingPunct(c) {
-  return c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 95 || c === 126 || c === 42 || c === 39;
+  return c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 95 || c === 126 || c === 42 || c === 39 || c === 59;
 }
 
 // ---------- inline link destination/title ----------
@@ -2227,6 +2324,7 @@ function renderTokens(toks, refs, inLink) {
       case 'strong': out += '<strong>' + renderTokens(t.children, refs, inLink) + '</strong>'; break;
       case 'del': out += '<del>' + renderTokens(t.children, refs, inLink) + '</del>'; break;
       case 'link': {
+        if (t.ext && inLink) { out += escapeHtml(t.text); break; }
         if (t.children) {
           out += '<a href="' + hrefAttr(t.href) + '"' + attrTitle(t.title) + '>' +
             renderTokens(t.children, refs, true) + '</a>';
