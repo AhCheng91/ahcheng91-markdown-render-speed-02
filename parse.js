@@ -203,6 +203,17 @@ function expandLeadTabs(text, pos, col, n) {
   if (!changed) return [text, pos, col, n];
   return [text.slice(0, pos) + out + text.slice(i), pos, col, n];
 }
+function fenceInItem(b) {
+  if (b.type !== 'fence') return false;
+  let p = b.parent;
+  while (p) {
+    if (p.type === 'blockquote') return false;
+    if (p.type === 'item') return true;
+    p = p.parent;
+  }
+  return false;
+}
+
 function incorporateLine(line, li, lines, stack, refs) {
   let text = line.t;
   let pos = 0;
@@ -260,7 +271,7 @@ function incorporateLine(line, li, lines, stack, refs) {
   const isLastLine = li === lines.length - 1;
   const paraOwnMatched = tip0.type === 'para' && container === stack[stack.length - 2];
   // closing fence check
-  if (tip0.type === 'fence' && allMatched) {
+  if (tip0.type === 'fence' && (allMatched || fenceInItem(tip0))) {
     let p = pos;
     const r0 = skipSpace(text, p, n, col, 3);
     p = r0[0];
@@ -274,7 +285,8 @@ function incorporateLine(line, li, lines, stack, refs) {
     }
     if (ok && len >= tip0.fenceLen) {
       tip0.open = false;
-      stack.pop();
+      const at = stack.lastIndexOf(tip0);
+      if (at > 0) stack.length = at;
       return li + 1;
     }
   }
@@ -326,7 +338,7 @@ function incorporateLine(line, li, lines, stack, refs) {
   }
 
   // a container above the deepest matched one failed: close it and everything under it
-  if (!allMatched && tip0.type !== 'para') {
+  if (!allMatched && tip0.type !== 'para' && !fenceInItem(tip0)) {
     closeUnmatched(stack, stack[matchedDepth] || stack[0]);
     tip0 = stack[stack.length - 1];
     container = tip0.type === 'list' ? (tip0.parent || stack[0]) : tip0;
@@ -541,7 +553,7 @@ function incorporateLine(line, li, lines, stack, refs) {
 
   // Phase 3: add text
   let tipNow = stack[stack.length - 1];
-  if (!consumed && !allMatched && (tipNow.type === 'fence' || tipNow.type === 'html' || tipNow.type === 'code' || tipNow.type === 'table')) {
+  if (!consumed && !allMatched && !fenceInItem(tipNow) && (tipNow.type === 'fence' || tipNow.type === 'html' || tipNow.type === 'code' || tipNow.type === 'table')) {
     closeUnmatched(stack, container);
     tipNow = stack[stack.length - 1];
   }
@@ -1817,7 +1829,7 @@ function tokenizeInline(src, refs, toks, delims, brackets) {
             continue;
           }
         }
-        const ext = tryExtUrl(src, i, bufStart, brackets.length > 0);
+        const ext = tryExtUrl(src, i, bufStart, brackets.length);
         if (ext) {
           flush();
           toks.push({ k: 'link', href: ext[2], title: null, text: ext[0], auto: true, ext: true });
@@ -1907,7 +1919,12 @@ function handleBracket(src, i, n, toks, delims, brackets, refs) {
         k = m;
       } else k++;
     }
-    if (runs.size > 1) noLink = true;
+    if (runs.size > 1) {
+      // ... unless the label ends with a backtick run
+      let e = i - 1;
+      while (e >= 0 && src.charCodeAt(e) === 32) e--;
+      if (!(e >= 0 && src.charCodeAt(e) === 96)) noLink = true;
+    }
   }
 
   // inline link/image: (dest "title")
@@ -2147,7 +2164,11 @@ function tryExtUrl(src, i, bufStart, inBracket) {
   while (j < n) {
     const c = src.charCodeAt(j);
     if (c <= 32 || c === 60) break;
-    if (inBracket && (c === 91 || c === 93)) break;
+    if (inBracket === 1 && c === 93) {
+      let q = j + 1;
+      if (q < n && src.charCodeAt(q) === 40) break;
+    }
+
     j++;
   }
   let end = j;
