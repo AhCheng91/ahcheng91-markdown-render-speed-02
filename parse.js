@@ -184,9 +184,25 @@ function applyOne(text, pos, col, n) {
 function expandTabAt(text, pos, col, n) {
   if (pos >= n || text.charCodeAt(pos) !== 9) return [text, pos, col, n];
   const w = 4 - (col & 3);
-  return [text.slice(0, pos) + ' '.repeat(w) + text.slice(pos + 1), pos + w, col + w, n + w - 1];
+  return [text.slice(0, pos) + ' '.repeat(w) + text.slice(pos + 1), pos, col, n + w - 1];
 }
 
+function expandLeadTabs(text, pos, col, n) {
+  if (col === 0) return [text, pos, col, n];
+  let i = pos, c = col, out = '', changed = false;
+  while (i < n) {
+    const ch = text.charCodeAt(i);
+    if (ch === 32) { out += ' '; i++; c++; continue; }
+    if (ch === 9) {
+      const w = 4 - (c & 3);
+      out += ' '.repeat(w);
+      i++; c += w; changed = true; continue;
+    }
+    break;
+  }
+  if (!changed) return [text, pos, col, n];
+  return [text.slice(0, pos) + out + text.slice(i), pos, col, n];
+}
 function incorporateLine(line, li, lines, stack, refs) {
   let text = line.t;
   let pos = 0;
@@ -208,8 +224,8 @@ function incorporateLine(line, li, lines, stack, refs) {
         p = r[0] + 1; c = r[1] + 1;
         const q = applyOne(text, p, c, n);
         text = q[0]; pos = q[1]; col = q[2]; n = q[3];
-        const q2 = expandTabAt(text, pos, col, n);
-        text = q2[0]; pos = q2[1]; col = q2[2]; n = q2[3];
+        const q2 = expandLeadTabs(text, pos, col, n);
+        text = q2[0]; pos = q2[1]; col = q2[2]; n = text.length;
         container = b; matchedDepth = d; continue;
       }
       allMatched = false; failedQuoteDepth = d; break;
@@ -238,6 +254,7 @@ function incorporateLine(line, li, lines, stack, refs) {
     allMatched = false; break;
   }
 
+  { const t = expandLeadTabs(text, pos, col, n); text = t[0]; pos = t[1]; col = t[2]; n = text.length; }
   let tip0 = stack[stack.length - 1];
   const rawWsOnly = isBlankAt(line.t, 0, line.t.length);
   const isLastLine = li === lines.length - 1;
@@ -427,8 +444,8 @@ function incorporateLine(line, li, lines, stack, refs) {
         pos = r[0] + 1; col = r[1] + 1;
         const q3 = applyOne(text, pos, col, n);
         text = q3[0]; pos = q3[1]; col = q3[2]; n = q3[3];
-        const q4 = expandTabAt(text, pos, col, n);
-        text = q4[0]; pos = q4[1]; col = q4[2]; n = q4[3];
+        const q4 = expandLeadTabs(text, pos, col, n);
+        text = q4[0]; pos = q4[1]; col = q4[2]; n = text.length;
         container = q2;
         continue;
       }
