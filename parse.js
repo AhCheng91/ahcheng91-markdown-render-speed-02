@@ -874,8 +874,9 @@ function renderBlocks(blocks, refs, loose, tight) {
 function renderBlock(b, refs, loose, tight) {
   switch (b.type) {
     case 'para': {
-      const src = b.lines.join('\n');
-      if (tight) return renderInline(src.replace(/[ \t]+$/, ''), refs, false);
+      let src = b.lines.join('\n');
+      if (tight || (b.parent && b.parent.type === 'item')) src = src.replace(/[ \t]+$/, '');
+      if (tight) return renderInline(src, refs, false);
       return '<p>' + renderInline(src, refs, false) + '</p>\n';
     }
     case 'heading':
@@ -1893,9 +1894,26 @@ function handleBracket(src, i, n, toks, delims, brackets, refs) {
   let result = null;
   let explicit = false; // a following () or [] was present, so no shortcut fallback
 
+  // a label that mixes backtick run lengths does not make a link in marked
+  let noLink = false;
+  if (!b.image) {
+    const runs = new Set();
+    let k = b.srcStart + openLen;
+    while (k < i) {
+      if (src.charCodeAt(k) === 96) {
+        let m = k;
+        while (m < i && src.charCodeAt(m) === 96) m++;
+        runs.add(m - k);
+        k = m;
+      } else k++;
+    }
+    if (runs.size > 1) noLink = true;
+  }
+
   // inline link/image: (dest "title")
   if (i + 1 < n && src.charCodeAt(i + 1) === 40) { // (
     result = parseInlineDest(src, i + 1, n);
+    if (noLink) result = null;
   }
   // reference links
   if (!result && i + 1 < n && src.charCodeAt(i + 1) === 91 && i + 2 < n && src.charCodeAt(i + 2) === 93) { // [foo][]
@@ -2026,8 +2044,10 @@ function tryExtEmail(src, at, bufStart) {
   }
   const rawDom = src.slice(domStart, i);
   const dom = rawDom.replace(/[._-]+$/, '');
-  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
-  if (dom.length < rawDom.length) i = domStart + dom.length;
+  if (rawDom.length > dom.length) {
+    if (/[-_]/.test(rawDom.slice(dom.length)) && /^[ \t]*$/.test(src.slice(i))) return null;
+    i = domStart + dom.length;
+  }
   if (!validDomain(dom)) return null;
   const email = src.slice(s, i);
   if (i < n && src.charCodeAt(i) === 47) return null; // followed by /
@@ -2061,8 +2081,10 @@ function tryExtEmailAt(src, pos, bufStart) {
   }
   const rawDom = src.slice(domStart, i);
   const dom = rawDom.replace(/[._-]+$/, '');
-  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
-  if (dom.length < rawDom.length) i = domStart + dom.length;
+  if (rawDom.length > dom.length) {
+    if (/[-_]/.test(rawDom.slice(dom.length)) && /^[ \t]*$/.test(src.slice(i))) return null;
+    i = domStart + dom.length;
+  }
   if (!validDomain(dom)) return null;
   if (i < n && src.charCodeAt(i) === 47) return null; // followed by /
   let e2 = i;
@@ -2186,8 +2208,10 @@ function scanEmailAfter(s, pos, n) {
   }
   const rawDom = s.slice(domStart, i);
   const dom = rawDom.replace(/[._-]+$/, '');
-  if (/[-_]/.test(rawDom.slice(dom.length))) return null;
-  if (dom.length < rawDom.length) i = domStart + dom.length;
+  if (rawDom.length > dom.length) {
+    if (/[-_]/.test(rawDom.slice(dom.length)) && /^[ \t]*$/.test(s.slice(i))) return null;
+    i = domStart + dom.length;
+  }
   if (!validDomain(dom)) return null;
   return [s.slice(pos, i), i];
 }
